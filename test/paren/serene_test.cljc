@@ -194,4 +194,31 @@
      {:valid ["foo@bar"]
       :invalid ["foobar"]})))
 
+#?(:clj
+   (defn ^:private read-forms [file]
+     (with-open [r (java.io.PushbackReader. (io/reader file))]
+       (doall (take-while #(not= ::eof %) (repeatedly #(read {:eof ::eof} r)))))))
+
+#?(:clj
+   (t/deftest spit-specs-test
+     (let [file (doto (java.io.File/createTempFile "serene_spit" ".clj") .delete)]
+       (try
+         (binding [serene/*chunk-size* 10]
+           (serene/spit-specs file 'paren.serene-spit-test (get-introspection-query-response)
+             {:prefix :spit}))
+         (let [[ns-decl & chunks] (read-forms file)
+               spec-defs (mapcat #(drop 2 (first %)) chunks)]
+           (t/testing "file starts with the ns declaration"
+             (t/is (= '(ns paren.serene-spit-test) (take 2 ns-decl))))
+           (t/testing "s/def forms are wrapped in ((fn [] ...)) chunks of at most *chunk-size*"
+             (t/is (< 1 (count chunks)))
+             (t/is (every? #(= '[fn []] (take 2 (first %))) chunks))
+             (t/is (every? #(<= (count (drop 2 (first %))) 10) chunks))
+             (t/is (every? #(= `s/def (first %)) spec-defs)))
+           (t/testing "the same number of specs as def-specs, all registered on load"
+             (t/is (= (count defined-specs) (count spec-defs)))
+             (load-file (str file))
+             (t/is (every? s/get-spec (map second spec-defs)))))
+         (finally (.delete file))))))
+
 #?(:cljs (doo.runner/doo-tests))

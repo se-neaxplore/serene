@@ -43,9 +43,43 @@
             (map (partial str ";;;"))
             (str/join \newline))))
 
+#?(:clj (def ^:private chunk-header
+          (->> [" Forms are wrapped in ((fn [] ...)) chunks to stay below the JVM 64KB"
+                " method size limit when AOT compiled."]
+            (map (partial str ";;;"))
+            (str/join \newline))))
+
+#?(:clj (def ^:dynamic *chunk-size*
+          "Number of `s/def` forms `spit-specs` wraps in one `((fn [] ...))`.
+
+          AOT compilation emits the code of every top-level form into the single
+          static `load()` method of the namespace's `__init` class, which overflows
+          the JVM's 64KB method limit for large schemas (`Method code too large!`,
+          the same bug `def-specs` works around). Each wrapper fn class has its own
+          64KB budget for `invoke()` and for its static constant initializer.
+          ~2300 forms of a real schema: 100 per chunk use ~31KB, 250 overflow."
+          100))
+
+#?(:clj (def ^:private fipp-options
+          {:symbols (assoc fipp/default-symbols
+                      `s/def (get fipp/default-symbols 'def))
+           :print-length nil
+           :print-level nil
+           :print-meta true
+           ;; chunked forms are indented by 3
+           :width 97}))
+
+#?(:clj (defn ^:private pprint-indented [form]
+          (->> (with-out-str (fipp/pprint form fipp-options))
+            str/trim-newline
+            str/split-lines
+            (map #(if (str/blank? %) % (str "   " %)))
+            (str/join \newline))))
+
 #?(:clj (defn spit-specs
           "Takes a file or file path, a simple symbol, a GraphQL schema, and an optional transducer or options map/seq.
-           Spits `s/def` forms defined by `schema` and modified by `xform` to `file` with namespace `ns`."
+           Spits `s/def` forms defined by `schema` and modified by `xform` to `file` with namespace `ns`.
+           The forms are wrapped in `((fn [] ...))` chunks of `*chunk-size*` so `ns` can be AOT compiled."
           ([file ns schema]
            (spit-specs file ns schema nil))
           ([file ns schema xform]
@@ -68,18 +102,15 @@
                                        (map vector)))
                            sort
                            (cons :require)
-                           (list 'ns ns))
-                 forms (cons ns-decl specs)]
+                           (list 'ns ns))]
              (with-open [writer (io/writer file)]
                (binding [*out* writer]
                  (println generated-file-header)
-                 (doseq [form forms]
+                 (println chunk-header)
+                 (println)
+                 (fipp/pprint ns-decl (assoc fipp-options :width 100))
+                 (doseq [chunk (partition-all *chunk-size* specs)]
                    (println)
-                   (fipp/pprint
-                     form
-                     {:symbols (assoc fipp/default-symbols
-                                 `s/def (get fipp/default-symbols 'def))
-                      :print-length nil
-                      :print-level nil
-                      :print-meta true
-                      :width 100}))))))))
+                   (println "((fn []")
+                   (print (str/join "\n\n" (map pprint-indented chunk)))
+                   (println "))"))))))))
